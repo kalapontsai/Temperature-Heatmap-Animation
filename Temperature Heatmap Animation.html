@@ -1,0 +1,924 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>動態溫度分布與功率圖表</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'Noto Sans TC', 'sans-serif'],
+                    },
+                }
+            }
+        }
+    </script>
+    <style>
+        /* 確保字體和排版 */
+        body {
+            font-family: 'Noto Sans TC', 'Inter', sans-serif;
+            background-color: #f0f4f8;
+        }
+        /* 400x400 像素的五宮格容器 (熱度圖) */
+        #heatmap-grid {
+            width: 400px;
+            height: 400px;
+            display: grid;
+            grid-template-columns: repeat(5, 1fr);
+            grid-template-rows: repeat(5, 1fr);
+            box-shadow: 0 10px 20px rgba(0, 0, 0, 0.1);
+            background-color: #e5e7eb; /* 預設背景色 */
+            background-size: cover; /* 確保背景圖覆蓋整個網格 */
+            background-position: center; /* 圖片置中 */
+            background-repeat: no-repeat;
+        }
+        /* 每個單元格的樣式 */
+        .grid-cell {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.25rem;
+            font-weight: 600;
+            color: white; 
+            transition: background-color 0.5s ease;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            /* 單元格背景色將由 JS 使用 rgba(..., 0.5) 設定透明度 */
+        }
+        /* 覆蓋最外層邊框 */
+        #heatmap-grid > :nth-child(5n) { border-right: none; }
+        #heatmap-grid > :nth-child(n+21) { border-bottom: none; }
+        #heatmap-grid > :nth-child(5n+1) { border-left: none; }
+        #heatmap-grid > :nth-child(-n+5) { border-top: none; }
+
+        .btn {
+            @apply px-6 py-3 rounded-xl font-semibold transition duration-200 shadow-md;
+        }
+
+        /* 新增的載入中指示器樣式 */
+        .spinner {
+            border: 4px solid rgba(0, 0, 0, 0.1);
+            border-left-color: #3b82f6; /* blue-500 */
+            border-radius: 50%;
+            width: 24px;
+            height: 24px;
+            animation: spin 1s linear infinite;
+            display: inline-block;
+            margin-right: 8px;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        /* 滑動條樣式 (使用 Tailwind 兼容風格) */
+        #speed-slider {
+            -webkit-appearance: none;
+            width: 100%;
+            height: 8px;
+            background: #d1d5db; /* gray-300 */
+            border-radius: 4px;
+            outline: none;
+            opacity: 0.7;
+            transition: opacity .2s;
+        }
+
+        #speed-slider:hover {
+            opacity: 1;
+        }
+
+        #speed-slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: #3b82f6; /* blue-500 */
+            cursor: pointer;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+        }
+
+        #speed-slider::-moz-range-thumb {
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: #3b82f6;
+            cursor: pointer;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+            border: none;
+        }
+
+        /* 對話框/Modal 樣式 */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.5);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+        
+        /* 讓 Canvas 擁有可點擊的指標 */
+        #power-chart {
+            cursor: crosshair;
+        }
+    </style>
+</head>
+<body class="flex flex-col items-center justify-center min-h-screen p-4">
+
+    <div class="max-w-7xl w-full flex flex-col items-center space-y-6">
+        <h1 class="text-3xl font-bold text-gray-800">動態溫度分布與功率圖表</h1>
+        
+        <p id="status-message" class="text-lg text-gray-600">請點擊下方按鈕選取 CSV 記錄檔。</p>
+
+        <!-- 檔案上傳與背景圖設定按鈕 -->
+        <div class="flex items-center space-x-4">
+            <input type="file" id="file-input" accept=".csv" class="hidden">
+            <button id="upload-btn" class="btn bg-blue-500 hover:bg-blue-600 text-white">
+                選取 CSV 記錄檔
+            </button>
+            <button id="select-image-btn" class="btn bg-purple-500 hover:bg-purple-600 text-white">
+                設定背景圖
+            </button>
+        </div>
+
+        <!-- 主要可視化區域 (熱度圖與折線圖) -->
+        <div class="flex flex-col md:flex-row space-y-6 md:space-y-0 md:space-x-8 items-start">
+            
+            <!-- 左側: 熱度圖 -->
+            <div class="flex flex-col items-center space-y-2">
+                <h2 class="text-xl font-semibold text-gray-700">溫度梯度與位置分布</h2>
+                <div id="heatmap-grid" class="rounded-2xl overflow-hidden shadow-xl">
+                    <!-- 25 個單元格 -->
+                    <div id="cell-11" class="grid-cell"></div><div id="cell-12" class="grid-cell"></div><div id="cell-13" class="grid-cell"></div><div id="cell-14" class="grid-cell"></div><div id="cell-15" class="grid-cell"></div>
+                    <div id="cell-21" class="grid-cell"></div><div id="cell-22" class="grid-cell"></div><div id="cell-23" class="grid-cell"></div><div id="cell-24" class="grid-cell"></div><div id="cell-25" class="grid-cell"></div>
+                    <div id="cell-31" class="grid-cell"></div><div id="cell-32" class="grid-cell"></div><div id="cell-33" class="grid-cell"></div>
+                    <div id="cell-34" class="grid-cell"></div><div id="cell-35" class="grid-cell"></div>
+                    <div id="cell-41" class="grid-cell"></div><div id="cell-42" class="grid-cell"></div><div id="cell-43" class="grid-cell"></div><div id="cell-44" class="grid-cell"></div><div id="cell-45" class="grid-cell"></div>
+                    <div id="cell-51" class="grid-cell"></div><div id="cell-52" class="grid-cell"></div><div id="cell-53" class="grid-cell"></div><div id="cell-54" class="grid-cell"></div><div id="cell-55" class="grid-cell"></div>
+                </div>
+            </div>
+
+            <!-- 右側: 功率折線圖 -->
+            <div class="flex flex-col items-center space-y-2">
+                <h2 class="text-xl font-semibold text-gray-700">P(W)功率</h2>
+                <!-- 400x400 畫素的 Canvas -->
+                <canvas id="power-chart" width="400" height="400" class="rounded-2xl shadow-xl border border-gray-300 bg-white"></canvas>
+            </div>
+
+        </div>
+
+        <!-- 播放控制按鈕 -->
+        <div class="flex items-center space-x-4">
+            <button id="start-btn" class="btn bg-green-500 hover:bg-green-600 text-white" disabled>
+                開始播放
+            </button>
+            <button id="stop-btn" class="btn bg-red-500 hover:bg-red-600 text-white" disabled>
+                停止播放
+            </button>
+        </div>
+
+        <!-- 播放速度控制滑動條 -->
+        <div class="w-full max-w-2xl mt-4 p-4 bg-white rounded-xl shadow">
+            <label for="speed-slider" class="block text-md font-semibold text-gray-700 mb-2">
+                播放速度：每筆 <span id="speed-display">1.0</span> 秒
+            </label>
+            <input 
+                type="range" 
+                id="speed-slider" 
+                min="10" 
+                max="5000" 
+                value="1000" 
+                step="100" 
+                class="w-full"
+                title="控制動畫播放速度 (0.01s - 5.0s)"
+            >
+            <div class="flex justify-between text-xs text-gray-500 mt-1">
+                <span>0.01 秒/筆 (最快)</span>
+                <span>5.0 秒/筆 (最慢)</span>
+            </div>
+        </div>
+
+        <!-- 數據資訊顯示區 -->
+        <div class="text-sm text-gray-500 mt-4 p-4 bg-white rounded-xl shadow w-full max-w-lg">
+            <p><strong>數據檔案：</strong> <span id="file-name">未選取</span></p>
+            <p><strong>溫度範圍：</strong> <span id="temp-range">N/A</span></p>
+            <p><strong>功率範圍：：</strong> <span id="power-range">N/A</span></p>
+            <p><strong>當前記錄：：</strong> 記錄 <span id="current-record-index">0</span> / 總共 <span id="total-records">0</span> 筆</p>
+            <p><strong>溫度色階：：</strong> 最低溫度 → <span class="font-bold text-blue-600">藍色 (50% 透明度)</span> | 最高溫度 → <span class="font-bold text-red-600">紅色 (50% 透明度)</span></p>
+        </div>
+    </div>
+
+    <!-- 圖片選取對話框 Modal -->
+    <div id="image-modal" class="modal-overlay hidden">
+        <div class="bg-white p-6 rounded-xl shadow-2xl w-full max-w-md space-y-4">
+            <h3 class="text-xl font-bold text-gray-800">選取熱度圖背景圖片</h3>
+            <p class="text-sm text-gray-600">請選取一張圖片作為 5x5 網格的背景圖。 (圖片將被自動裁剪並覆蓋網格區域)</p>
+            <input type="file" id="image-input" accept="image/*" class="w-full border p-2 rounded-lg">
+            <div class="flex justify-end space-x-3 mt-4">
+                <button id="cancel-image-btn" class="btn bg-gray-300 hover:bg-gray-400 text-gray-800">
+                    取消
+                </button>
+                <button id="clear-image-btn" class="btn bg-yellow-500 hover:bg-yellow-600 text-white">
+                    清除背景圖
+                </button>
+                <button id="confirm-image-btn" class="btn bg-blue-500 hover:bg-blue-600 text-white">
+                    設定
+                </button>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        // 設定 API 相關資訊 (此處留空，由 Canvas 環境提供)
+        const API_KEY = ""; 
+        const API_URL = "";
+
+        let data = []; // 儲存解析後的溫度數據 {coordId: temp}
+        let powerData = []; // 儲存 P(W) 數據
+        
+        let minTemp = Infinity;
+        let maxTemp = -Infinity;
+        let minPower = Infinity;
+        let maxPower = -Infinity;
+
+        let animationInterval = null;
+        let currentFrame = 0; // 記錄當前播放的幀數索引
+        let animationSpeed = 1000; // 預設 1000ms (1秒)
+        let currentBackgroundImageUrl = ''; // 儲存背景圖 URL
+        let userSelectedFrame = null; // 新增：用於儲存使用者點擊的幀索引
+        
+        const CELL_SIZE = 5; 
+        
+        // 產生座標 ID 陣列 (11, 12, ..., 55)
+        const cellIds = [];
+        for (let x = 1; x <= CELL_SIZE; x++) { 
+            for (let y = 1; y <= CELL_SIZE; y++) { 
+                cellIds.push(`${x}${y}`); 
+            }
+        }
+
+        // --- DOM 元素引用 ---
+        const statusMessage = document.getElementById('status-message');
+        const fileNameDisplay = document.getElementById('file-name');
+        const tempRangeDisplay = document.getElementById('temp-range');
+        const powerRangeDisplay = document.getElementById('power-range');
+        const currentRecordIndexDisplay = document.getElementById('current-record-index');
+        const totalRecordsDisplay = document.getElementById('total-records');
+        const startBtn = document.getElementById('start-btn');
+        const stopBtn = document.getElementById('stop-btn');
+        const uploadBtn = document.getElementById('upload-btn');
+        const fileInput = document.getElementById('file-input');
+        const speedSlider = document.getElementById('speed-slider');
+        const speedDisplay = document.getElementById('speed-display');
+        const imageModal = document.getElementById('image-modal');
+        const selectImageBtn = document.getElementById('select-image-btn');
+        const imageInput = document.getElementById('image-input');
+        const confirmImageBtn = document.getElementById('confirm-image-btn');
+        const cancelImageBtn = document.getElementById('cancel-image-btn');
+        const clearImageBtn = document.getElementById('clear-image-btn');
+        const heatmapGrid = document.getElementById('heatmap-grid');
+        const powerChartCanvas = document.getElementById('power-chart');
+        
+        // 收集 25 個單元格元素
+        const cells = cellIds.map(id => document.getElementById(`cell-${id}`));
+
+        /**
+         * 釋放 Blob URL (如果存在)
+         */
+        function revokeCurrentBackgroundUrl() {
+             if (currentBackgroundImageUrl && currentBackgroundImageUrl.startsWith('blob:')) {
+                URL.revokeObjectURL(currentBackgroundImageUrl);
+            }
+        }
+
+        /**
+         * 設定熱度圖的背景圖片
+         */
+        function setHeatmapBackground(url) {
+            revokeCurrentBackgroundUrl(); // 釋放舊的 URL
+            currentBackgroundImageUrl = url;
+            if (url) {
+                heatmapGrid.style.backgroundImage = `url('${url}')`;
+            } else {
+                heatmapGrid.style.backgroundImage = 'none';
+            }
+        }
+
+        /**
+         * 重置應用程式狀態
+         */
+        function resetAppState() {
+            stopAnimation();
+            data = [];
+            powerData = [];
+            minTemp = Infinity;
+            maxTemp = -Infinity;
+            minPower = Infinity;
+            maxPower = -Infinity;
+            currentFrame = 0;
+            userSelectedFrame = null;
+            
+            // 重置顯示
+            fileNameDisplay.textContent = '未選取';
+            tempRangeDisplay.textContent = 'N/A';
+            powerRangeDisplay.textContent = 'N/A';
+            currentRecordIndexDisplay.textContent = 0;
+            totalRecordsDisplay.textContent = 0;
+            
+            // 重置速度滑動條 (保持預設值)
+            speedSlider.value = 1000;
+            speedDisplay.textContent = '1.0';
+
+            // 重置熱度圖單元格
+            cells.forEach((cell) => {
+                cell.style.backgroundColor = 'transparent'; // 完全透明
+                cell.textContent = '';
+                cell.style.color = 'transparent';
+            });
+            
+            // 設定中央單元格的初始提示文字
+            const centerCell = document.getElementById('cell-33');
+            if (centerCell) {
+                centerCell.textContent = '請載入數據';
+                centerCell.style.color = 'white';
+                // 給予中央單元格一個臨時的半透明背景，以便文字在沒有背景圖時可讀
+                centerCell.style.backgroundColor = 'rgba(0, 0, 0, 0.5)'; 
+            }
+
+            // 清除折線圖 Canvas
+            if (powerChartCanvas) {
+                const ctx = powerChartCanvas.getContext('2d');
+                ctx.clearRect(0, 0, powerChartCanvas.width, powerChartCanvas.height);
+                ctx.fillStyle = '#ffffff'; 
+                ctx.fillRect(0, 0, powerChartCanvas.width, powerChartCanvas.height);
+            }
+            
+            startBtn.disabled = true;
+            stopBtn.disabled = true;
+            uploadBtn.disabled = false;
+            selectImageBtn.disabled = false;
+            statusMessage.textContent = '請點擊「選取 CSV 記錄檔」按鈕。';
+        }
+
+
+        /**
+         * 1. 解析 CSV 數據並找出全局最小/最大溫度和功率。
+         */
+        function parseAndAnalyzeData(csvText) {
+            minTemp = Infinity;
+            maxTemp = -Infinity;
+            minPower = Infinity;
+            maxPower = -Infinity;
+            
+            const rows = csvText.trim().split('\n');
+            if (rows.length < 2) {
+                throw new Error('CSV 檔案中記錄筆數不足 (至少需要標頭和一筆數據)。');
+            }
+
+            // 1. 處理標頭行
+            const headerCoords = rows[0].split(',').map(s => s.trim());
+            const numColumns = headerCoords.length;
+            const powerIndex = headerCoords.findIndex(h => h === 'P(W)'); // 尋找 P(W) 欄位索引
+
+            let mappedHeaderCoords = headerCoords; 
+
+            // 90度順時針旋轉映射邏輯 (僅針對 3x3 簡單數字標頭 1-9)
+            if (numColumns >= 9 && headerCoords.slice(0, 9).every((h, i) => h === String(i + 1))) {
+                console.warn("偵測到 3x3 簡單數字標頭 (1-9)，自動映射到 5x5 網格的左上角 (11, 12, ..., 33)，並執行順時針 90 度旋轉。");
+                // 原始數據欄位順序 (k): 1 2 3 / 4 5 6 / 7 8 9 (行主序)
+                // 旋轉後對應的網格座標 ID: 13, 23, 33, 12, 22, 32, 11, 21, 31
+                const tempHeaders = ['13', '23', '33', '12', '22', '32', '11', '21', '31'];
+                // 擴展映射標頭以包含 P(W)
+                mappedHeaderCoords = headerCoords.map((h, i) => i < 9 ? tempHeaders[i] : h);
+            }
+            
+            const dataRows = rows.slice(1);
+            const parsedData = [];
+            const parsedPowerData = [];
+
+            dataRows.forEach(row => {
+                const values = row.split(',');
+                
+                if (values.length !== numColumns) {
+                     console.warn(`警告: 跳過長度不匹配的行，預期 ${numColumns} 個欄位，實際 ${values.length} 個: ${row}`);
+                     return;
+                }
+
+                const frameData = {}; 
+                let validDataCount = 0;
+                let framePower = null; 
+
+                values.forEach((valStr, index) => {
+                    const val = parseFloat(valStr.trim());
+                    
+                    if (!isNaN(val)) {
+                        
+                        // 處理溫度數據
+                        const coordId = mappedHeaderCoords[index];
+                        if (cellIds.includes(coordId)) {
+                            frameData[coordId] = val;
+                            validDataCount++;
+                            if (val < minTemp) minTemp = val;
+                            if (val > maxTemp) maxTemp = val;
+                        }
+                        
+                        // 處理功率 P(W) 數據
+                        if (index === powerIndex) {
+                            framePower = val;
+                            if (val < minPower) minPower = val;
+                            if (val > maxPower) maxPower = val;
+                        }
+
+                    }
+                });
+
+                if (validDataCount > 0) {
+                    parsedData.push(frameData);
+                    parsedPowerData.push(framePower); // 儲存功率值 (可能為 null)
+                }
+            });
+
+            if (minTemp === Infinity || maxTemp === -Infinity) {
+                 throw new Error('CSV 檔案中沒有找到有效的溫度記錄。');
+            }
+
+            // 檢查 P(W) 數據
+            if (powerIndex === -1 || minPower === Infinity) {
+                console.warn("未找到有效的 'P(W)' 欄位或數據，折線圖將無法顯示。");
+                powerData = [];
+                minPower = 0;
+                maxPower = 0;
+            } else {
+                powerData = parsedPowerData;
+            }
+
+            return parsedData; 
+        }
+
+        /**
+         * 2. 將溫度值映射到 RGB 顏色，從藍 (最小) 到紅 (最大)，並使用 50% 透明度 (0.5)。
+         */
+        function tempToColor(temp, min, max) {
+            // 透明度調整為 0.5 (50%)
+            const ALPHA = 0.5;
+
+            if (min === max) {
+                // 如果所有值都相同，使用中性色 (洋紅色/紫紅色) 50% 透明度
+                return `rgba(255, 0, 255, ${ALPHA})`; 
+            }
+
+            const ratio = (temp - min) / (max - min);
+
+            // B: 從 255 (min, ratio=0) 降到 0 (max, ratio=1)
+            const B = Math.round(255 * (1 - ratio));
+            // R: 從 0 (min, ratio=0) 升到 255 (max, ratio=1)
+            const R = Math.round(255 * ratio);
+            
+            const G = 0;
+
+            return `rgba(${R}, ${G}, ${B}, ${ALPHA})`;
+        }
+        
+        /**
+         * 3. 繪製 P(W) 功率折線圖。
+         * 參數 drawIndex: 決定要標記哪一幀 (可能是動畫的 currentFrame，或是使用者點擊的 userSelectedFrame)
+         */
+        function drawChart(drawIndex) {
+            const ctx = powerChartCanvas.getContext('2d');
+            const width = powerChartCanvas.width;
+            const height = powerChartCanvas.height;
+            
+            const padding = 40;
+            const chartWidth = width - 2 * padding;
+            const chartHeight = height - 2 * padding;
+            const numPoints = powerData.length;
+            
+            // 1. 清除 Canvas
+            ctx.clearRect(0, 0, width, height);
+            ctx.fillStyle = '#ffffff'; 
+            ctx.fillRect(0, 0, width, height);
+            
+            if (numPoints === 0 || maxPower === minPower) {
+                ctx.fillStyle = '#6b7280';
+                ctx.font = '16px Noto Sans TC';
+                ctx.textAlign = 'center';
+                ctx.fillText('P(W) 數據不足或數值不變', width / 2, height / 2);
+                return;
+            }
+
+            // 2. 定義縮放比例 (範圍為 1，避免除以零)
+            const yRange = maxPower - minPower;
+            const adjustedYRange = yRange === 0 ? 1 : yRange; 
+            
+            const yOffset = minPower;
+            const yRatio = chartHeight / adjustedYRange; 
+            const xRatio = numPoints > 1 ? chartWidth / (numPoints - 1) : 0;
+
+            ctx.save();
+            ctx.translate(padding, height - padding); // 將原點移至圖表左下角
+
+            // 3. 繪製軸線和標籤
+            ctx.strokeStyle = '#6b7280'; // 軸線顏色
+            ctx.lineWidth = 2;
+            
+            // X-Axis (水平)
+            ctx.beginPath();
+            ctx.moveTo(0, 0);
+            ctx.lineTo(chartWidth, 0);
+            ctx.stroke();
+
+            // Y-Axis (垂直)
+            ctx.beginPath();
+            ctx.moveTo(0, 0);
+            ctx.lineTo(0, -chartHeight);
+            ctx.stroke();
+            
+            // Y-Axis 標籤 (Min/Max Power)
+            ctx.font = '12px Noto Sans TC';
+            ctx.fillStyle = '#374151'; 
+            ctx.textAlign = 'right';
+            
+            ctx.fillText(maxPower.toFixed(1), -5, -chartHeight);
+            ctx.fillText(minPower.toFixed(1), -5, 5);
+
+            // Y-Axis 標題
+            ctx.textAlign = 'center';
+            ctx.save();
+            ctx.translate(-padding + 10, -chartHeight / 2);
+            ctx.rotate(-Math.PI / 2);
+            ctx.fillText('P(W)', 0, 0);
+            ctx.restore();
+
+            // X-Axis 標題
+            ctx.textAlign = 'center';
+            ctx.fillText('時間 (記錄編號)', chartWidth / 2, 25);
+            
+            ctx.restore(); // 恢復到 (0, 0) 原點
+
+            // 4. 繪製折線圖
+            ctx.save();
+            ctx.translate(padding, height - padding); // 移至圖表左下角
+
+            ctx.strokeStyle = '#f97316'; // 橙色線條
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            
+            let firstPoint = true;
+            powerData.forEach((power, i) => {
+                if (power !== null) {
+                    // 座標轉換: Y = -(power - minPower) * YRatio
+                    const yPos = -(power - yOffset) * yRatio; 
+                    const xPos = i * xRatio;
+
+                    if (firstPoint) {
+                        ctx.moveTo(xPos, yPos);
+                        firstPoint = false;
+                    } else {
+                        ctx.lineTo(xPos, yPos);
+                    }
+                }
+            });
+            ctx.stroke();
+
+            // 5. 繪製當前幀標記 (垂直虛線和圓點)
+            // drawIndex 可能是 animationFrame 或 userSelectedFrame
+            const currentDrawIndex = drawIndex % numPoints;
+            const currentX = currentDrawIndex * xRatio;
+            
+            ctx.strokeStyle = '#dc2626'; // 紅色標記
+            ctx.lineWidth = 2;
+            ctx.setLineDash([5, 5]); // 虛線
+            
+            ctx.beginPath();
+            ctx.moveTo(currentX, 0);
+            ctx.lineTo(currentX, -chartHeight);
+            ctx.stroke();
+            
+            ctx.setLineDash([]); // 恢復實線
+            
+            // 繪製圓點標記
+            const currentPower = powerData[currentDrawIndex];
+            if (currentPower !== null) {
+                 const currentY = -(currentPower - yOffset) * yRatio;
+                 ctx.fillStyle = '#dc2626';
+                 ctx.beginPath();
+                 ctx.arc(currentX, currentY, 5, 0, Math.PI * 2);
+                 ctx.fill();
+            }
+            
+            ctx.restore();
+        }
+
+
+        /**
+         * 4. 繪製當前幀的數據到五宮格並更新圖表。
+         */
+        function drawFrame(frameIndex) {
+            if (data.length === 0) return;
+
+            const actualIndex = frameIndex % data.length;
+            const currentFrameData = data[actualIndex];
+            
+            // 繪製熱度圖
+            cellIds.forEach((id, index) => {
+                const cell = cells[index];
+                const temp = currentFrameData[id]; 
+                
+                if (temp !== undefined) {
+                    // 使用帶有 50% 透明度的顏色
+                    const color = tempToColor(temp, minTemp, maxTemp);
+                    cell.style.backgroundColor = color;
+                    cell.textContent = temp.toFixed(1); 
+                    
+                    // 調整文字顏色以確保可讀性
+                    const colorParts = color.substring(5, color.lastIndexOf(',')).split(',').map(s => parseInt(s.trim(), 10));
+                    const rVal = colorParts[0];
+                    const gVal = colorParts[1];
+                    const bVal = colorParts[2];
+                    const brightness = (0.299 * rVal + 0.587 * gVal + 0.114 * bVal);
+                    // 確保文字在透明覆蓋層上可讀
+                    cell.style.color = brightness > 128 ? '#000000' : '#FFFFFF';
+                } else {
+                    // 如果沒有數據，則完全透明
+                    cell.textContent = '';
+                    cell.style.color = 'transparent';
+                    cell.style.backgroundColor = 'transparent'; 
+                }
+            });
+
+            // 繪製折線圖
+            drawChart(actualIndex);
+
+            // 更新 UI 顯示
+            currentRecordIndexDisplay.textContent = actualIndex + 1;
+        }
+
+
+        /**
+         * 5. 啟動動畫循環。
+         */
+        function startAnimation() {
+            if (animationInterval || data.length === 0) return;
+            
+            // 清除使用者選擇的幀 (恢復動畫播放)
+            userSelectedFrame = null;
+            
+            // 重置動畫開始幀
+            currentFrame = currentFrame % data.length;
+
+            // 在開始播放時，如果中央單元格有提示，則清除它
+            const centerCell = document.getElementById('cell-33');
+            if (centerCell && centerCell.textContent === '請載入數據') {
+                 centerCell.textContent = '';
+                 centerCell.style.color = 'transparent';
+                 centerCell.style.backgroundColor = 'transparent'; 
+            }
+
+            animationInterval = setInterval(() => {
+                drawFrame(currentFrame);
+                currentFrame++;
+                if (currentFrame >= data.length) {
+                    currentFrame = 0; // 循環播放
+                }
+            }, animationSpeed); // 使用動態速度變數
+
+            startBtn.disabled = true;
+            stopBtn.disabled = false;
+            uploadBtn.disabled = true;
+            statusMessage.textContent = `正在播放動畫 (${fileNameDisplay.textContent}，速度: ${speedDisplay.textContent} 秒/筆)...`;
+        }
+
+        /**
+         * 6. 停止動畫循環。
+         */
+        function stopAnimation() {
+            if (animationInterval) {
+                clearInterval(animationInterval);
+                animationInterval = null;
+                startBtn.disabled = false;
+                stopBtn.disabled = true;
+                uploadBtn.disabled = false;
+                statusMessage.textContent = '播放已暫停。';
+            }
+        }
+
+        /**
+         * 7. 處理速度滑動條變更
+         */
+        function handleSpeedChange(event) {
+            // 從滑動條取得毫秒值 
+            const newSpeedMs = parseInt(event.target.value, 10);
+            animationSpeed = newSpeedMs;
+            
+            // 顯示秒數 (除以 1000)
+            const speedSeconds = newSpeedMs / 1000;
+            const decimalPlaces = newSpeedMs < 100 ? 2 : 1; 
+            speedDisplay.textContent = speedSeconds.toFixed(decimalPlaces);
+
+            // 如果動畫正在播放中，清除舊的間隔並以新速度重新啟動
+            if (animationInterval) {
+                stopAnimation();
+                startAnimation();
+            }
+        }
+        
+        /**
+         * 8. 處理圖片選取確認
+         */
+        function handleImageSelectConfirm() {
+            const file = imageInput.files[0];
+            if (file) {
+                // 建立新的 Blob URL
+                const newUrl = URL.createObjectURL(file);
+                setHeatmapBackground(newUrl);
+                statusMessage.textContent = `已成功設定背景圖 (${file.name})。`;
+            } else {
+                 statusMessage.textContent = '沒有選取圖片。';
+            }
+            closeImageModal();
+        }
+
+        /**
+         * 9. 處理清除背景圖
+         */
+        function handleClearImage() {
+            setHeatmapBackground(''); // 清除背景圖
+            imageInput.value = null; // 清除檔案輸入
+            statusMessage.textContent = '已清除背景圖。';
+            closeImageModal();
+        }
+
+        /**
+         * 10. 檔案選擇處理器
+         */
+        function handleFileSelect(event) {
+            const file = event.target.files[0];
+            if (!file) {
+                return;
+            }
+
+            resetAppState();
+            
+            fileNameDisplay.textContent = file.name;
+            statusMessage.innerHTML = '<span class="spinner"></span> 正在解析數據...';
+            uploadBtn.disabled = true;
+            selectImageBtn.disabled = true;
+
+            const reader = new FileReader();
+            
+            reader.onload = function(e) {
+                try {
+                    const csvText = e.target.result;
+                    const parsedData = parseAndAnalyzeData(csvText);
+
+                    data = parsedData;
+                    
+                    // 顯示範圍和總筆數
+                    tempRangeDisplay.textContent = `${minTemp.toFixed(1)}°C (藍) 至 ${maxTemp.toFixed(1)}°C (紅)`;
+                    powerRangeDisplay.textContent = minPower === Infinity ? 'N/A' : `${minPower.toFixed(1)}W 至 ${maxPower.toFixed(1)}W`;
+                    totalRecordsDisplay.textContent = data.length;
+
+                    // 繪製第一幀和圖表
+                    drawFrame(0);
+                    
+                    statusMessage.textContent = '數據載入完成。點擊「開始播放」按鈕。或點擊圖表查看特定時刻。';
+                    startBtn.disabled = false;
+                    stopBtn.disabled = true; 
+                    uploadBtn.disabled = false;
+                    selectImageBtn.disabled = false;
+
+                    // 載入完成後自動播放
+                    // startAnimation(); // 註釋掉自動播放，讓使用者決定
+                    
+                } catch (error) {
+                    console.error("檔案解析錯誤:", error);
+                    statusMessage.textContent = `檔案解析失敗: ${error.message}`;
+                    resetAppState(); 
+                    uploadBtn.disabled = false;
+                    selectImageBtn.disabled = false;
+                }
+            };
+            
+            reader.onerror = function() {
+                const errorMsg = '無法讀取檔案。請確認檔案沒有損壞。';
+                console.error("檔案讀取錯誤:", errorMsg);
+                statusMessage.textContent = `檔案讀取錯誤: ${errorMsg}`;
+                resetAppState();
+                uploadBtn.disabled = false;
+                selectImageBtn.disabled = false;
+            };
+
+            reader.readAsText(file); 
+        }
+        
+        /**
+         * 11. 處理功率圖表上的點擊事件
+         */
+        function handleChartClick(event) {
+            if (data.length === 0 || powerData.length === 0) {
+                statusMessage.textContent = '請先載入有效的 CSV 數據。';
+                return;
+            }
+
+            // 1. 停止動畫
+            if (animationInterval) {
+                stopAnimation();
+                // 停止後更新狀態訊息
+                statusMessage.textContent = `播放已暫停。您正在查看記錄編號 ${currentFrame + 1} 的數據。`;
+            }
+
+            const canvas = powerChartCanvas;
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = event.clientX - rect.left;
+            
+            const padding = 40;
+            const chartWidth = canvas.width - 2 * padding;
+            const numPoints = powerData.length;
+
+            // 2. 計算點擊位置對應的記錄編號 (X 軸索引)
+            
+            // 點擊位置在圖表區域內的 X 座標
+            let clickX = mouseX - padding;
+
+            // 限制點擊位置在圖表區域內
+            if (clickX < 0) clickX = 0;
+            if (clickX > chartWidth) clickX = chartWidth;
+            
+            // 點與點之間的 X 距離 (xRatio)
+            const xRatio = numPoints > 1 ? chartWidth / (numPoints - 1) : 0;
+            
+            let frameIndex;
+            if (xRatio === 0) {
+                 frameIndex = 0; // 只有一筆數據的情況
+            } else {
+                // 計算離哪個點最近
+                const potentialIndex = clickX / xRatio;
+                frameIndex = Math.round(potentialIndex);
+            }
+
+            // 限制索引在有效範圍內
+            if (frameIndex < 0) frameIndex = 0;
+            if (frameIndex >= numPoints) frameIndex = numPoints - 1;
+
+            // 3. 更新當前幀索引並繪製
+            currentFrame = frameIndex; // 將動畫幀同步到手動選擇的幀
+            userSelectedFrame = frameIndex; // 設置手動選擇標記
+            
+            drawFrame(currentFrame);
+            
+            statusMessage.textContent = `已鎖定記錄編號 ${currentFrame + 1}。點擊「開始播放」繼續動畫。`;
+        }
+
+        function openImageModal() {
+            imageModal.classList.remove('hidden');
+        }
+
+        function closeImageModal() {
+            imageModal.classList.add('hidden');
+        }
+
+
+        /**
+         * 12. 初始化應用程式：設定事件監聽器。
+         */
+        function initialize() {
+            resetAppState();
+            
+            // 檔案處理事件
+            uploadBtn.addEventListener('click', () => {
+                fileInput.click();
+            });
+            fileInput.addEventListener('change', handleFileSelect);
+
+            // 動畫控制事件
+            startBtn.addEventListener('click', startAnimation);
+            stopBtn.addEventListener('click', stopAnimation);
+            
+            // 速度控制事件
+            speedSlider.addEventListener('input', handleSpeedChange);
+            
+            // 功率圖表點擊事件 (新功能)
+            powerChartCanvas.addEventListener('mousedown', handleChartClick);
+
+            // 圖片選取對話框事件
+            selectImageBtn.addEventListener('click', openImageModal);
+            cancelImageBtn.addEventListener('click', closeImageModal);
+            confirmImageBtn.addEventListener('click', handleImageSelectConfirm);
+            clearImageBtn.addEventListener('click', handleClearImage);
+
+            statusMessage.textContent = '請點擊「選取 CSV 記錄檔」按鈕開始。';
+            
+            // 初始時，背景圖按鈕應該是啟用的
+            selectImageBtn.disabled = false;
+        }
+
+        window.onload = initialize;
+    </script>
+</body>
+</html>
